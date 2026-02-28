@@ -12,7 +12,7 @@ borrow enUSD against WETH at 0% interest. no governance. no admin keys.
 | EnniOracle | dual-feed ETH/USD oracle. chainlink + chronicle. |
 | EnniDirectMint | 1:1 USDC/USDT ↔ enUSD minting and redemption. |
 | EnniMasterChef | 30-year ENNI emission schedule. up to 8 pools. |
-| EnniVault | staking vault. ENNI stakers earn protocol revenue. |
+| EnniVault | staking vault. protocol revenue donated directly to ENNI stakers.|
 
 ## license
 
