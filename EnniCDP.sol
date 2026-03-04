@@ -7,11 +7,14 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IEnniOracle {
-    /// @dev Price is USD per ETH, scaled by 1e18. (e.g., $2,500 → 2500e18)
+    /// @dev Price is fiat per ETH, scaled by 1e18. (e.g., $2,500 → 2500e18)
+    ///      Primary: USD. Future: EUR, CHF, JPY or any fiat with a supported oracle.
     function peekPriceWithTimestamp() external view returns (uint256 price, uint256 updatedAt);
 }
 
-interface IEnniUSD {
+interface IEnniStable {
+    /// @dev Any Enni-issued fiat stablecoin. Primary: enUSD. Future: enEUR, enCHF, enJPY, ...
+    ///      All Enni stablecoins use 6 decimals by convention.
     function decimals() external view returns (uint8);
     function mint(address to, uint256 amount) external;
     function burn(uint256 amount) external;
@@ -30,8 +33,10 @@ contract EnniCDP is ReentrancyGuard {
     IERC20 public immutable weth;
     IEnniOracle public immutable oracle;
 
-    IERC20 public immutable enUsdToken;
-    IEnniUSD public immutable enUSD;
+    /// @dev The fiat stablecoin this CDP issues. Primary: enUSD. Future: enEUR, enCHF, enJPY, ...
+    ///      Deploy a separate CDP instance per stablecoin, each with its own oracle and stable token.
+    IERC20 public immutable stableToken;
+    IEnniStable public immutable stable;
 
     IEnniRewardsVault public immutable rewardsVault;
 
@@ -39,25 +44,27 @@ contract EnniCDP is ReentrancyGuard {
     uint256 public constant BPS = 10_000;
     uint256 public constant MAX_LTV_BPS = 8_500; // 85.00%
     uint256 public constant LIQ_LTV_BPS = 8_800; // 88.00%
-    uint256 public constant MIN_DEBT = 400e6;    // enUSD 6 decimals
+    uint256 public constant MIN_DEBT = 400e6;     // 400 units of stablecoin (6 decimals)
+                                                  // e.g. $400 for enUSD. For enJPY deployments
+                                                  // consider a higher value to reflect weaker unit.
 
-    uint256 public constant DONATION_BPS = 300;  // 3% of seized WETH donated ONLY during liquidation
+    uint256 public constant DONATION_BPS = 300;   // 3% of seized WETH donated ONLY during liquidation
     uint256 public constant ORACLE_MAX_AGE = 24 hours;
 
     uint256 private constant WETH_DECIMALS = 1e18;
-    uint256 private constant USD_SCALE = 1e12; // 1e18 -> 1e6
-    uint256 private constant USD_TO_ETH_NUMERATOR = USD_SCALE * WETH_DECIMALS; // 1e30
+    uint256 private constant FIAT_SCALE = 1e12;                               // 1e18 -> 1e6
+    uint256 private constant FIAT_TO_ETH_NUMERATOR = FIAT_SCALE * WETH_DECIMALS; // 1e30
 
     // ----------------- storage -----------------
     struct Position {
         uint256 collateral; // WETH 1e18
-        uint256 debt;       // enUSD 1e6
+        uint256 debt;       // stablecoin 1e6
     }
 
     /// @dev One position slot per wallet. A position is considered "active" if collateral/debt/credit is nonzero
     mapping(address => Position) private _pos;
 
-    /// @dev Premium credit earned by owner (enUSD 1e6)
+    /// @dev Premium credit earned by owner (stablecoin 1e6)
     mapping(address => uint256) public premiumCredit;
 
     // ----------------- events -----------------
@@ -104,21 +111,25 @@ contract EnniCDP is ReentrancyGuard {
     error UseLiquidation();
 
     // ----------------- constructor -----------------
-    constructor(address _weth, address _oracle, address _enUSD, address _rewardsVault) {
+    /// @param _weth         Collateral token (WETH)
+    /// @param _oracle       Price feed returning fiat/ETH at 1e18. Primary: USD. Future: EUR, CHF, JPY, ...
+    /// @param _stable       Fiat stablecoin this CDP mints. Primary: enUSD. Future: enEUR, enCHF, enJPY, ...
+    /// @param _rewardsVault Rewards vault receiving WETH liquidation donations
+    constructor(address _weth, address _oracle, address _stable, address _rewardsVault) {
         require(_weth != address(0), "WETH=0");
         require(_oracle != address(0), "Oracle=0");
-        require(_enUSD != address(0), "enUSD=0");
+        require(_stable != address(0), "Stable=0");
         require(_rewardsVault != address(0), "Vault=0");
 
         weth = IERC20(_weth);
         oracle = IEnniOracle(_oracle);
 
-        enUsdToken = IERC20(_enUSD);
-        enUSD = IEnniUSD(_enUSD);
+        stableToken = IERC20(_stable);
+        stable = IEnniStable(_stable);
 
         rewardsVault = IEnniRewardsVault(_rewardsVault);
 
-        require(enUSD.decimals() == 6, "enUSD decimals");
+        require(stable.decimals() == 6, "stable decimals");
         require(DONATION_BPS < BPS, "bad donation bps");
 
         // Allow vault to pull WETH donations from this contract
@@ -160,13 +171,13 @@ contract EnniCDP is ReentrancyGuard {
     }
 
     // ----------------- math helpers -----------------
-    function _ethToUsdWithPrice(uint256 ethAmount, uint256 price) internal pure returns (uint256) {
-        uint256 usd18 = Math.mulDiv(ethAmount, price, WETH_DECIMALS);
-        return usd18 / USD_SCALE; // 1e6
+    function _ethToFiatWithPrice(uint256 ethAmount, uint256 price) internal pure returns (uint256) {
+        uint256 fiat18 = Math.mulDiv(ethAmount, price, WETH_DECIMALS);
+        return fiat18 / FIAT_SCALE; // 1e6
     }
 
-    function _usdToEthWithPrice(uint256 usdAmount, uint256 price) internal pure returns (uint256) {
-        return Math.mulDiv(usdAmount, USD_TO_ETH_NUMERATOR, price); // 1e18
+    function _fiatToEthWithPrice(uint256 fiatAmount, uint256 price) internal pure returns (uint256) {
+        return Math.mulDiv(fiatAmount, FIAT_TO_ETH_NUMERATOR, price); // 1e18
     }
 
     // ----------------- views -----------------
@@ -188,10 +199,10 @@ contract EnniCDP is ReentrancyGuard {
         (uint256 price, bool fresh) = _tryFreshPrice();
         if (!fresh) return (0, false);
 
-        uint256 collateralUsd = _ethToUsdWithPrice(p.collateral, price);
-        if (collateralUsd == 0) return (0, false);
+        uint256 collateralFiat = _ethToFiatWithPrice(p.collateral, price);
+        if (collateralFiat == 0) return (0, false);
 
-        return (Math.mulDiv(p.debt, BPS, collateralUsd), true);
+        return (Math.mulDiv(p.debt, BPS, collateralFiat), true);
     }
 
     function isLiquidatable(address owner) external view returns (bool) {
@@ -236,14 +247,14 @@ contract EnniCDP is ReentrancyGuard {
         uint256 newDebt = p.debt + amount;
         if (p.debt == 0 && newDebt < MIN_DEBT) revert MinDebt();
 
-        uint256 collateralUsd = _ethToUsdWithPrice(p.collateral, price);
-        if (collateralUsd == 0) revert OracleBad();
+        uint256 collateralFiat = _ethToFiatWithPrice(p.collateral, price);
+        if (collateralFiat == 0) revert OracleBad();
 
-        uint256 maxDebt = Math.mulDiv(collateralUsd, MAX_LTV_BPS, BPS);
+        uint256 maxDebt = Math.mulDiv(collateralFiat, MAX_LTV_BPS, BPS);
         if (newDebt > maxDebt) revert LtvTooHigh();
 
         p.debt = newDebt;
-        enUSD.mint(msg.sender, amount);
+        stable.mint(msg.sender, amount);
 
         emit Borrowed(msg.sender, amount, p.debt, block.timestamp);
     }
@@ -258,8 +269,8 @@ contract EnniCDP is ReentrancyGuard {
         uint256 remaining = p.debt - amount;
         if (remaining != 0 && remaining < MIN_DEBT) revert RemainingDebtRule();
 
-        enUsdToken.safeTransferFrom(msg.sender, address(this), amount);
-        enUSD.burn(amount);
+        stableToken.safeTransferFrom(msg.sender, address(this), amount);
+        stable.burn(amount);
 
         p.debt = remaining;
         emit Repaid(msg.sender, amount, p.debt, block.timestamp);
@@ -276,10 +287,10 @@ contract EnniCDP is ReentrancyGuard {
         uint256 newCollateral = p.collateral - amount;
 
         if (p.debt > 0) {
-            uint256 collateralUsd = _ethToUsdWithPrice(newCollateral, price);
-            if (collateralUsd == 0) revert OracleBad();
+            uint256 collateralFiat = _ethToFiatWithPrice(newCollateral, price);
+            if (collateralFiat == 0) revert OracleBad();
 
-            uint256 maxDebt = Math.mulDiv(collateralUsd, MAX_LTV_BPS, BPS);
+            uint256 maxDebt = Math.mulDiv(collateralFiat, MAX_LTV_BPS, BPS);
             if (p.debt > maxDebt) revert LtvTooHigh();
         }
 
@@ -296,7 +307,7 @@ contract EnniCDP is ReentrancyGuard {
         if (credit < amount) revert InvalidRepay();
 
         premiumCredit[msg.sender] = credit - amount;
-        enUsdToken.safeTransfer(msg.sender, amount);
+        stableToken.safeTransfer(msg.sender, amount);
 
         emit PremiumClaimed(msg.sender, amount, premiumCredit[msg.sender], block.timestamp);
     }
@@ -316,7 +327,7 @@ contract EnniCDP is ReentrancyGuard {
         premiumCredit[msg.sender] = 0;
 
         if (c > 0) weth.safeTransfer(msg.sender, c);
-        if (prem > 0) enUsdToken.safeTransfer(msg.sender, prem);
+        if (prem > 0) stableToken.safeTransfer(msg.sender, prem);
 
         emit PositionClosed(msg.sender, c, prem, block.timestamp);
     }
@@ -331,10 +342,10 @@ contract EnniCDP is ReentrancyGuard {
         if (p.debt == 0) revert InvalidRepay();
         if (repayAmount > p.debt) revert InvalidRepay();
 
-        uint256 collateralUsdBefore = _ethToUsdWithPrice(p.collateral, price);
-        uint256 ltvBefore = collateralUsdBefore == 0
+        uint256 collateralFiatBefore = _ethToFiatWithPrice(p.collateral, price);
+        uint256 ltvBefore = collateralFiatBefore == 0
             ? type(uint256).max
-            : Math.mulDiv(p.debt, BPS, collateralUsdBefore);
+            : Math.mulDiv(p.debt, BPS, collateralFiatBefore);
 
         // if liquidatable, liquidation path must be used
         if (ltvBefore >= LIQ_LTV_BPS) revert UseLiquidation();
@@ -350,12 +361,12 @@ contract EnniCDP is ReentrancyGuard {
         uint256 premium = Math.mulDiv(repayAmount, rateBps, BPS);
         uint256 totalPay = repayAmount + premium;
 
-        uint256 collateralOut = _usdToEthWithPrice(repayAmount, price);
+        uint256 collateralOut = _fiatToEthWithPrice(repayAmount, price);
         if (collateralOut == 0) revert OracleBad();
         if (collateralOut > p.collateral) revert InsufficientCollateral();
 
-        enUsdToken.safeTransferFrom(msg.sender, address(this), totalPay);
-        enUSD.burn(repayAmount);
+        stableToken.safeTransferFrom(msg.sender, address(this), totalPay);
+        stable.burn(repayAmount);
 
         premiumCredit[owner] += premium;
 
@@ -376,10 +387,10 @@ contract EnniCDP is ReentrancyGuard {
         if (p.debt == 0) revert InvalidRepay();
         if (repayAmount > p.debt) revert InvalidRepay();
 
-        uint256 collateralUsdBefore = _ethToUsdWithPrice(p.collateral, price);
-        uint256 ltvBefore = collateralUsdBefore == 0
+        uint256 collateralFiatBefore = _ethToFiatWithPrice(p.collateral, price);
+        uint256 ltvBefore = collateralFiatBefore == 0
             ? type(uint256).max
-            : Math.mulDiv(p.debt, BPS, collateralUsdBefore);
+            : Math.mulDiv(p.debt, BPS, collateralFiatBefore);
 
         if (ltvBefore < LIQ_LTV_BPS) revert NotLiquidatable();
 
@@ -392,8 +403,8 @@ contract EnniCDP is ReentrancyGuard {
         uint256 donation = Math.mulDiv(collateralSeized, DONATION_BPS, BPS);
         uint256 toLiquidator = collateralSeized - donation;
 
-        enUsdToken.safeTransferFrom(msg.sender, address(this), repayAmount);
-        enUSD.burn(repayAmount);
+        stableToken.safeTransferFrom(msg.sender, address(this), repayAmount);
+        stable.burn(repayAmount);
 
         p.debt = remaining;
         p.collateral -= collateralSeized;
