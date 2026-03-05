@@ -18,7 +18,7 @@ currently live: **enUSD** (USD) and **enCHF** (CHF). more currencies can be depl
 
 ## license
 
-unlicensed. all contracts are public. the code is the agreement.
+unlicensed.
 
 ## links
 
