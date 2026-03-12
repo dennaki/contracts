@@ -52,7 +52,7 @@ contract EnniCDP is ReentrancyGuard {
     uint256 public constant ORACLE_MAX_AGE = 24 hours;
 
     uint256 private constant WETH_DECIMALS = 1e18;
-    uint256 private constant FIAT_SCALE = 1e12;                               // 1e18 -> 1e6
+    uint256 private constant FIAT_SCALE = 1e12;                                // 1e18 -> 1e6
     uint256 private constant FIAT_TO_ETH_NUMERATOR = FIAT_SCALE * WETH_DECIMALS; // 1e30
 
     // ----------------- storage -----------------
@@ -73,6 +73,7 @@ contract EnniCDP is ReentrancyGuard {
     event CollateralWithdrawn(address indexed owner, uint256 amount, uint256 newCollateral, uint256 timestamp);
     event Borrowed(address indexed owner, uint256 amount, uint256 newDebt, uint256 timestamp);
     event Repaid(address indexed owner, uint256 amount, uint256 remainingDebt, uint256 timestamp);
+    event RepaidFor(address indexed caller, address indexed owner, uint256 amount, uint256 remainingDebt, uint256 timestamp);
 
     event Buyout(
         address indexed owner,
@@ -133,7 +134,6 @@ contract EnniCDP is ReentrancyGuard {
         require(DONATION_BPS < BPS, "bad donation bps");
 
         // Allow vault to pull WETH donations from this contract
-        // SafeERC20.forceApprove exists in OZ v5+
         weth.forceApprove(_rewardsVault, type(uint256).max);
     }
 
@@ -259,21 +259,41 @@ contract EnniCDP is ReentrancyGuard {
         emit Borrowed(msg.sender, amount, p.debt, block.timestamp);
     }
 
+    /// @notice Repay your own debt with stablecoins from your wallet.
     function repay(uint256 amount) external nonReentrant {
-        if (amount == 0) revert ZeroAmount();
-        if (!_hasPosition(msg.sender)) revert NoPosition();
+        _repay(msg.sender, msg.sender, amount);
+    }
 
-        Position storage p = _pos[msg.sender];
+    /// @notice Repay debt on behalf of `owner`. Stablecoins pulled from msg.sender.
+    ///         Restricted to contract callers (routers/zaps) only.
+    function repayFor(address owner, uint256 amount) external nonReentrant {
+        require(owner != address(0), "owner=0");
+        require(msg.sender.code.length > 0, "only contracts");
+        _repay(owner, msg.sender, amount);
+    }
+
+    /// @dev Shared repay logic.
+    ///      `owner` = whose debt is reduced
+    ///      `payer` = who provides the stablecoins (always msg.sender in public fns)
+    function _repay(address owner, address payer, uint256 amount) internal {
+        if (amount == 0) revert ZeroAmount();
+        if (!_hasPosition(owner)) revert NoPosition();
+
+        Position storage p = _pos[owner];
         if (p.debt < amount) revert InvalidRepay();
 
         uint256 remaining = p.debt - amount;
         if (remaining != 0 && remaining < MIN_DEBT) revert RemainingDebtRule();
 
-        stableToken.safeTransferFrom(msg.sender, address(this), amount);
+        stableToken.safeTransferFrom(payer, address(this), amount);
         stable.burn(amount);
 
         p.debt = remaining;
-        emit Repaid(msg.sender, amount, p.debt, block.timestamp);
+
+        emit Repaid(owner, amount, p.debt, block.timestamp);
+        if (payer != owner) {
+            emit RepaidFor(payer, owner, amount, p.debt, block.timestamp);
+        }
     }
 
     function withdraw(uint256 amount) external nonReentrant {
