@@ -24,6 +24,7 @@ contract EnniToken is ERC20, ERC20Permit {
         require(msg.sender == owner, "Not owner");
         _;
     }
+
     modifier onlyMinter() {
         require(msg.sender == minter1 || msg.sender == minter2, "Not authorized minter");
         _;
@@ -35,19 +36,21 @@ contract EnniToken is ERC20, ERC20Permit {
         uint8 decimals_,
         uint256 initialSupply_,
         uint256 maxMintable_,
+        address owner_,
         address minter1_,
         address minter2_
     )
         ERC20(name_, symbol_)
         ERC20Permit(name_)
     {
+        require(owner_ != address(0), "owner zero address");
         require(minter1_ != address(0), "minter1 zero address");
         require(minter2_ != address(0), "minter2 zero address");
         require(maxMintable_ == 0 || initialSupply_ <= maxMintable_, "Initial supply exceeds maxMintable");
 
         _decimals = decimals_;
         maxMintable = maxMintable_;
-        owner = msg.sender;
+        owner = owner_;
         minter1 = minter1_;
         minter2 = minter2_;
 
