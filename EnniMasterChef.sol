@@ -26,6 +26,7 @@ interface IMintableERC20 is IERC20 {
  * - Deposit measures received amount to support fee-on-transfer LP tokens.
  * - Withdraw transfers requested amount; fee-on-transfer LP may deliver less to the receiver.
  * - Emissions are clamped by MAX_CHEF_MINT so the Chef never intentionally mints above its budget.
+ * - depositFor() allows approved routers (e.g. Zap contracts) to deposit on behalf of a user.
  */
 contract EnniMasterChef is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -87,6 +88,7 @@ contract EnniMasterChef is Ownable, ReentrancyGuard {
     event PoolUpdated(uint256 indexed pid, uint256 allocPoint);
 
     event Deposit(address indexed user, uint256 indexed pid, uint256 amountIn);
+    event DepositFor(address indexed caller, address indexed beneficiary, uint256 indexed pid, uint256 amountIn);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amountOut);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amountOut);
 
@@ -298,28 +300,48 @@ contract EnniMasterChef is Ownable, ReentrancyGuard {
     }
 
     // ---------------- user actions ----------------
+
+    /// @notice Deposit LP tokens for yourself.
     function deposit(uint256 pid, uint256 amount) external nonReentrant {
+        _deposit(pid, amount, msg.sender, msg.sender);
+    }
+
+    /// @notice Deposit LP tokens on behalf of `beneficiary`.
+    ///         LP tokens are pulled from msg.sender (the caller pays).
+    ///         Position is credited to `beneficiary`.
+    ///         Any pending rewards for `beneficiary` are harvested to `beneficiary`.
+    function depositFor(uint256 pid, uint256 amount, address beneficiary) external nonReentrant {
+        require(beneficiary != address(0), "beneficiary=0");
+        _deposit(pid, amount, msg.sender, beneficiary);
+    }
+
+    /// @dev Internal deposit logic shared by deposit() and depositFor().
+    /// @param pid       Pool ID
+    /// @param amount    Amount of LP tokens to deposit
+    /// @param from      Address to pull LP tokens from (always msg.sender in public fns)
+    /// @param beneficiary Address to credit in UserInfo and receive pending rewards
+    function _deposit(uint256 pid, uint256 amount, address from, address beneficiary) internal {
         _requirePid(pid);
 
         PoolInfo storage pool = poolInfo[pid];
-        UserInfo storage u = userInfo[pid][msg.sender];
+        UserInfo storage u = userInfo[pid][beneficiary];
 
         _updatePool(pid);
 
-        // harvest pending
+        // harvest pending rewards to beneficiary
         if (u.amount > 0) {
             uint256 accumulated = Math.mulDiv(u.amount, pool.accEnniPerShare, ACC_PRECISION);
             uint256 pending = accumulated > u.rewardDebt ? (accumulated - u.rewardDebt) : 0;
             if (pending > 0) {
-                _safeEnniTransfer(msg.sender, pending);
-                emit Harvest(msg.sender, pid, pending);
+                _safeEnniTransfer(beneficiary, pending);
+                emit Harvest(beneficiary, pid, pending);
             }
         }
 
         uint256 received = 0;
         if (amount > 0) {
             uint256 beforeBal = pool.lpToken.balanceOf(address(this));
-            pool.lpToken.safeTransferFrom(msg.sender, address(this), amount);
+            pool.lpToken.safeTransferFrom(from, address(this), amount);
             uint256 afterBal = pool.lpToken.balanceOf(address(this));
             received = afterBal - beforeBal;
             require(received > 0, "no lp received");
@@ -329,7 +351,11 @@ contract EnniMasterChef is Ownable, ReentrancyGuard {
         }
 
         u.rewardDebt = Math.mulDiv(u.amount, pool.accEnniPerShare, ACC_PRECISION);
-        emit Deposit(msg.sender, pid, received);
+
+        emit Deposit(beneficiary, pid, received);
+        if (from != beneficiary) {
+            emit DepositFor(from, beneficiary, pid, received);
+        }
     }
 
     function withdraw(uint256 pid, uint256 amount) external nonReentrant {
