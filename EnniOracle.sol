@@ -15,27 +15,22 @@ interface AggregatorV3Interface {
         );
 }
 
-interface IChronicle {
-    function readWithAge() external view returns (uint256 value, uint256 age);
-    function decimals() external view returns (uint8);
-}
-
 contract EnniOracleV1 {
     AggregatorV3Interface public immutable CHAINLINK;
-    IChronicle public immutable CHRONICLE;
+    AggregatorV3Interface public immutable REDSTONE;
 
     /// @notice Optional Chainlink translator (e.g. JPY/USD, EUR/USD, CHF/USD).
     ///         address(0) = no translation, pure ETH/USD.
     AggregatorV3Interface public immutable TRANSLATOR;
 
     uint256 public constant STALE_CHAINLINK  = 6 hours;
-    uint256 public constant STALE_CHRONICLE  = 24 hours;
+    uint256 public constant STALE_REDSTONE   = 24 hours;
     uint256 public constant STALE_TRANSLATOR = 24 hours;
 
     uint256 public lastGoodPrice;
     uint256 public lastGoodUpdatedAt;
 
-    enum Source { None, Chainlink, Chronicle, Cached }
+    enum Source { None, Chainlink, Redstone, Cached }
 
     event PriceUpdated(Source source, uint256 price, uint256 timestamp);
 
@@ -43,14 +38,12 @@ contract EnniOracleV1 {
 
     constructor(
         address chainlinkEthUsd,
-        address chronicleEthUsd,
+        address redstoneEthUsd,
         address translator           // address(0) = no translation
     ) {
-        CHAINLINK  = AggregatorV3Interface(chainlinkEthUsd);
-        CHRONICLE  = IChronicle(chronicleEthUsd);
+        CHAINLINK = AggregatorV3Interface(chainlinkEthUsd);
+        REDSTONE  = AggregatorV3Interface(redstoneEthUsd);
         TRANSLATOR = AggregatorV3Interface(translator);
-
-        require(CHRONICLE.decimals() == 18, "Chronicle decimals != 18");
 
         (bool ok, uint256 p, uint256 ts, ) = _readBest();
         if (!ok) revert OracleUnavailable();
@@ -118,8 +111,8 @@ contract EnniOracleV1 {
         return _readChainlinkFeed(CHAINLINK, STALE_CHAINLINK);
     }
 
-    function readChronicle() external view returns (bool ok, uint256 price, uint256 updatedAt) {
-        return _readChronicle();
+    function readRedstone() external view returns (bool ok, uint256 price, uint256 updatedAt) {
+        return _readChainlinkFeed(REDSTONE, STALE_REDSTONE);
     }
 
     function readTranslator() external view returns (bool ok, uint256 price, uint256 updatedAt) {
@@ -140,10 +133,10 @@ contract EnniOracleV1 {
             if (tok) return (true, tp, tt, Source.Chainlink);
         }
 
-        (bool okCh, uint256 pCh, uint256 tCh) = _readChronicle();
-        if (okCh) {
-            (bool tok2, uint256 tp2, uint256 tt2) = _translate(pCh, tCh);
-            if (tok2) return (true, tp2, tt2, Source.Chronicle);
+        (bool okRs, uint256 pRs, uint256 tRs) = _readChainlinkFeed(REDSTONE, STALE_REDSTONE);
+        if (okRs) {
+            (bool tok2, uint256 tp2, uint256 tt2) = _translate(pRs, tRs);
+            if (tok2) return (true, tp2, tt2, Source.Redstone);
         }
 
         return (false, 0, 0, Source.None);
@@ -166,7 +159,7 @@ contract EnniOracleV1 {
         return (true, translated, minTs);
     }
 
-    /// @dev Shared Chainlink reader — used for both primary ETH/USD and translator feed.
+    /// @dev Shared Chainlink-compatible reader — used for Chainlink, RedStone, and translator feeds.
     function _readChainlinkFeed(AggregatorV3Interface feed, uint256 staleThreshold)
         internal view returns (bool, uint256, uint256)
     {
@@ -199,27 +192,6 @@ contract EnniOracleV1 {
         } catch {
             return (false, 0, 0);
         }
-    }
-
-    function _readChronicle() internal view returns (bool, uint256, uint256) {
-        uint256 val;
-        uint256 ts;
-
-        try CHRONICLE.readWithAge() returns (uint256 v, uint256 a) {
-            val = v;
-            ts = a;
-        } catch {
-            return (false, 0, 0);
-        }
-
-        if (
-            val == 0 ||
-            ts == 0 ||
-            ts > block.timestamp ||
-            block.timestamp - ts > STALE_CHRONICLE
-        ) return (false, 0, 0);
-
-        return (true, val, ts);
     }
 
     function _scaleTo18(uint256 price, uint8 dec) internal pure returns (uint256) {
