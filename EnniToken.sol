@@ -102,7 +102,11 @@ contract EnniToken is ERC20, ERC20Permit {
     function burnFrom(address account, uint256 amount) external {
         uint256 allowed = allowance(account, msg.sender);
         require(allowed >= amount, "Burn exceeds allowance");
-        _approve(account, msg.sender, allowed - amount);
+
+        if (allowed != type(uint256).max) {
+            _approve(account, msg.sender, allowed - amount);
+        }
+
         _burn(account, amount);
         totalBurned += amount;
         emit Burn(account, amount);
