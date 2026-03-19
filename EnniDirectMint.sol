@@ -114,9 +114,12 @@ contract EnniDirectMint is ReentrancyGuard {
 
         IERC20Metadata(address(enUSD)).safeTransferFrom(msg.sender, address(this), amount);
 
-        // Donate fee to vault — non-blocking to guarantee liveness
+        // [M-08 fix] Burn fee if vault donation fails.
+        // No enUSD is orphaned — total supply stays accurate.
         if (fee > 0) {
-            try rewardsVault.donateEnUSD(fee) {} catch {}
+            try rewardsVault.donateEnUSD(fee) {} catch {
+                enUSD.burn(fee);
+            }
         }
 
         enUSD.burn(net);
