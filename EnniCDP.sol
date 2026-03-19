@@ -200,7 +200,10 @@ contract EnniCDP is ReentrancyGuard {
         if (!fresh) return (0, false);
 
         uint256 collateralFiat = _ethToFiatWithPrice(p.collateral, price);
-        if (collateralFiat == 0) return (0, false);
+
+        // [M-05 fix] Dust collateral with real debt = maximally underwater.
+        // Aligns view behavior with liquidate() which uses type(uint256).max.
+        if (collateralFiat == 0) return (type(uint256).max, true);
 
         return (Math.mulDiv(p.debt, BPS, collateralFiat), true);
     }
@@ -232,9 +235,18 @@ contract EnniCDP is ReentrancyGuard {
         weth.safeTransferFrom(msg.sender, address(this), amount);
 
         Position storage p = _pos[msg.sender];
+
+        // [L-01 fix] Ghost position: if collateral and debt are both zero
+        // (position exists only via premiumCredit), treat this as a new open
+        // so off-chain indexers see the PositionOpened event.
+        bool wasGhost = (p.collateral == 0 && p.debt == 0);
         p.collateral += amount;
 
-        emit CollateralDeposited(msg.sender, amount, p.collateral, block.timestamp);
+        if (wasGhost) {
+            emit PositionOpened(msg.sender, p.collateral, block.timestamp);
+        } else {
+            emit CollateralDeposited(msg.sender, amount, p.collateral, block.timestamp);
+        }
     }
 
     function borrow(uint256 amount) external nonReentrant {
@@ -414,8 +426,10 @@ contract EnniCDP is ReentrancyGuard {
 
         if (ltvBefore < LIQ_LTV_BPS) revert NotLiquidatable();
 
+        // [H-03 fix] MIN_DEBT not enforced on liquidation — liquidators need
+        // full flexibility to clear bad debt in any amount.
+        // The MIN_DEBT rule remains enforced on borrow(), repay(), and buyout().
         uint256 remaining = p.debt - repayAmount;
-        if (remaining != 0 && remaining < MIN_DEBT) revert RemainingDebtRule();
 
         uint256 collateralSeized = Math.mulDiv(p.collateral, repayAmount, p.debt);
         if (collateralSeized == 0) revert OracleBad();
@@ -429,9 +443,12 @@ contract EnniCDP is ReentrancyGuard {
         p.debt = remaining;
         p.collateral -= collateralSeized;
 
-        // ---- donation is non-blocking ----
+        // [M-04 fix] Redirect donation to liquidator on vault failure.
+        // No WETH is orphaned in the CDP — liquidator receives full collateral.
         if (donation > 0) {
-            try rewardsVault.donateWETH(donation) {} catch {}
+            try rewardsVault.donateWETH(donation) {} catch {
+                toLiquidator += donation;
+            }
         }
 
         weth.safeTransfer(msg.sender, toLiquidator);
