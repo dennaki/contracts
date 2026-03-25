@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 interface IMintableERC20 is IERC20 {
     function mint(address to, uint256 amount) external;
@@ -97,6 +98,7 @@ contract EnniMasterChef is Ownable, ReentrancyGuard {
     // ---------------- constructor ----------------
     constructor(IMintableERC20 enni_, uint64 startTime_) Ownable(msg.sender) {
         require(address(enni_) != address(0), "ENNI=0");
+        require(IERC20Metadata(address(enni_)).decimals() == 18, "ENNI decimals");
 
         enni = enni_;
         startTime = startTime_;
