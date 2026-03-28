@@ -7,20 +7,22 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title EnniSavings
- * @notice Inflation-funded savings rate for ENNI stablecoins.
+ * @notice Fixed 5% APR savings for ENNI stablecoins.
  *
- * - Deposit enUSD (or enEUR), earn 6% APR in newly minted stablecoin.
+ * - Deposit enUSD (or enCHF), earn 5% APR in newly minted stablecoin.
  * - Deposit and withdraw: instant, no lock.
  * - Claim and compound: 24h cooldown, reset only on deposit.
- * - Cap: 60% of total supply (enforced on deposit and compound only).
- * - Immutable. No owner. No admin. No upgrades.
+ * - No cap. No owner. No admin. No upgrades. Immutable.
+ *
+ * Yield is funded by the protocol's reserve surplus — the positive spread
+ * between total collateral value and outstanding liabilities. Calibrated
+ * to sovereign benchmark yields. Maintained by protocol-level capital adequacy.
  *
  * Deploy one instance per stablecoin.
  */
 
 interface IEnniStableMintable is IERC20 {
     function mint(address to, uint256 amount) external;
-    function totalSupply() external view returns (uint256);
 }
 
 contract EnniSavings is ReentrancyGuard {
@@ -29,8 +31,7 @@ contract EnniSavings is ReentrancyGuard {
     // ==================== CONSTANTS ====================
 
     uint256 public constant BPS = 10_000;
-    uint256 public constant ANNUAL_RATE_BPS = 600;             // 6% APR
-    uint256 public constant MAX_STAKE_BPS = 6000;              // 60% of total supply
+    uint256 public constant ANNUAL_RATE_BPS = 500;             // 5% APR
     uint256 public constant ACC_PRECISION = 1e18;
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     uint256 public constant CLAIM_COOLDOWN = 24 hours;
@@ -136,9 +137,6 @@ contract EnniSavings is ReentrancyGuard {
         uint256 amount = u.settled;
         require(amount > 0, "nothing");
 
-        uint256 cap = (stableToken.totalSupply() * MAX_STAKE_BPS) / BPS;
-        require(totalStaked + amount <= cap, "cap reached");
-
         u.settled = 0;
 
         stableToken.mint(address(this), amount);
@@ -167,17 +165,6 @@ contract EnniSavings is ReentrancyGuard {
         return u.settled + unsettled;
     }
 
-    /// @notice Current stake cap based on total supply.
-    function stakeCap() external view returns (uint256) {
-        return (stableToken.totalSupply() * MAX_STAKE_BPS) / BPS;
-    }
-
-    /// @notice Remaining capacity before cap is reached.
-    function remainingCap() external view returns (uint256) {
-        uint256 cap = (stableToken.totalSupply() * MAX_STAKE_BPS) / BPS;
-        return cap > totalStaked ? (cap - totalStaked) : 0;
-    }
-
     // ==================== INTERNAL ====================
 
     function _deposit(uint256 amount, address beneficiary) internal {
@@ -185,9 +172,6 @@ contract EnniSavings is ReentrancyGuard {
 
         _updateRewards();
         _settle(beneficiary);
-
-        uint256 cap = (stableToken.totalSupply() * MAX_STAKE_BPS) / BPS;
-        require(totalStaked + amount <= cap, "cap reached");
 
         IERC20(address(stableToken)).safeTransferFrom(msg.sender, address(this), amount);
 
