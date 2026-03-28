@@ -11,6 +11,7 @@ contract EnniToken is ERC20, ERC20Permit {
     address public owner;
     address public minter1;
     address public minter2;
+    address public minter3;
 
     uint256 public totalMinted;
     uint256 public totalBurned;
@@ -19,6 +20,7 @@ contract EnniToken is ERC20, ERC20Permit {
     event OwnerTransferred(address indexed oldOwner, address indexed newOwner);
     event Minter1Changed(address indexed oldMinter, address indexed newMinter);
     event Minter2Changed(address indexed oldMinter, address indexed newMinter);
+    event Minter3Changed(address indexed oldMinter, address indexed newMinter);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
@@ -26,7 +28,10 @@ contract EnniToken is ERC20, ERC20Permit {
     }
 
     modifier onlyMinter() {
-        require(msg.sender == minter1 || msg.sender == minter2, "Not authorized minter");
+        require(
+            msg.sender == minter1 || msg.sender == minter2 || msg.sender == minter3,
+            "Not authorized minter"
+        );
         _;
     }
 
@@ -38,7 +43,8 @@ contract EnniToken is ERC20, ERC20Permit {
         uint256 maxMintable_,
         address owner_,
         address minter1_,
-        address minter2_
+        address minter2_,
+        address minter3_
     )
         ERC20(name_, symbol_)
         ERC20Permit(name_)
@@ -46,6 +52,7 @@ contract EnniToken is ERC20, ERC20Permit {
         require(owner_ != address(0), "owner zero address");
         require(minter1_ != address(0), "minter1 zero address");
         require(minter2_ != address(0), "minter2 zero address");
+        require(minter3_ != address(0), "minter3 zero address");
         require(maxMintable_ == 0 || initialSupply_ <= maxMintable_, "Initial supply exceeds maxMintable");
 
         _decimals = decimals_;
@@ -53,6 +60,7 @@ contract EnniToken is ERC20, ERC20Permit {
         owner = owner_;
         minter1 = minter1_;
         minter2 = minter2_;
+        minter3 = minter3_;
 
         if (initialSupply_ > 0) {
             totalMinted = initialSupply_;
@@ -74,6 +82,12 @@ contract EnniToken is ERC20, ERC20Permit {
         require(newMinter != address(0), "zero address");
         emit Minter2Changed(minter2, newMinter);
         minter2 = newMinter;
+    }
+
+    function setMinter3(address newMinter) external onlyOwner {
+        require(newMinter != address(0), "zero address");
+        emit Minter3Changed(minter3, newMinter);
+        minter3 = newMinter;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
