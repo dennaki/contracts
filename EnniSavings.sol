@@ -11,7 +11,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  *
  * - Deposit enUSD (or enCHF), earn 5% APR in newly minted stablecoin.
  * - Deposit and withdraw: instant, no lock.
- * - Claim and compound: 24h cooldown, reset only on deposit.
+ * - Claim and compound: 1h cooldown, reset only on deposit.
  * - No cap. No owner. No admin. No upgrades. Immutable.
  *
  * Yield is funded by the protocol's reserve surplus — the positive spread
@@ -34,7 +34,7 @@ contract EnniSavings is ReentrancyGuard {
     uint256 public constant ANNUAL_RATE_BPS = 500;             // 5% APR
     uint256 public constant ACC_PRECISION = 1e18;
     uint256 public constant SECONDS_PER_YEAR = 365 days;
-    uint256 public constant CLAIM_COOLDOWN = 24 hours;
+    uint256 public constant CLAIM_COOLDOWN = 1 hours;
 
     uint256 public constant RATE_PER_SECOND =
         (ANNUAL_RATE_BPS * ACC_PRECISION) / (BPS * SECONDS_PER_YEAR);
@@ -47,6 +47,7 @@ contract EnniSavings is ReentrancyGuard {
     uint256 public totalStaked;
     uint256 public accRewardPerShare;
     uint64  public lastUpdateTime;
+    uint256 public totalRewardsMinted;
 
     struct UserInfo {
         uint256 staked;
@@ -76,7 +77,7 @@ contract EnniSavings is ReentrancyGuard {
 
     // ==================== PUBLIC ACTIONS ====================
 
-    /// @notice Deposit stablecoins. Instant. Resets 24h claim cooldown.
+    /// @notice Deposit stablecoins. Instant. Resets 1h claim cooldown.
     function deposit(uint256 amount) external nonReentrant {
         _deposit(amount, msg.sender);
     }
@@ -86,6 +87,7 @@ contract EnniSavings is ReentrancyGuard {
     function depositFor(uint256 amount, address beneficiary) external nonReentrant {
         require(msg.sender == router, "only router");
         require(beneficiary != address(0), "beneficiary=0");
+        require(beneficiary != address(this), "beneficiary=self");
         _deposit(amount, beneficiary);
     }
 
@@ -108,38 +110,50 @@ contract EnniSavings is ReentrancyGuard {
         emit Withdraw(msg.sender, amount);
     }
 
-    /// @notice Claim settled rewards. Requires 24h since last deposit.
+    /// @notice Claim settled rewards. Requires 1h since last deposit.
     function claim() external nonReentrant {
         _updateRewards();
         _settle(msg.sender);
 
         UserInfo storage u = userInfo[msg.sender];
-        require(block.timestamp >= u.lastClaimTime + CLAIM_COOLDOWN, "24h");
+        require(block.timestamp >= u.lastClaimTime + CLAIM_COOLDOWN, "1h");
 
         uint256 amount = u.settled;
         require(amount > 0, "nothing");
 
         u.settled = 0;
+        totalRewardsMinted += amount;
 
+        uint256 before = IERC20(address(stableToken)).balanceOf(msg.sender);
         stableToken.mint(msg.sender, amount);
+        require(
+            IERC20(address(stableToken)).balanceOf(msg.sender) >= before + amount,
+            "mint failed"
+        );
 
         emit Claim(msg.sender, amount);
     }
 
-    /// @notice Compound settled rewards into staked balance. Requires 24h since last deposit.
+    /// @notice Compound settled rewards into staked balance. Requires 1h since last deposit.
     function compound() external nonReentrant {
         _updateRewards();
         _settle(msg.sender);
 
         UserInfo storage u = userInfo[msg.sender];
-        require(block.timestamp >= u.lastClaimTime + CLAIM_COOLDOWN, "24h");
+        require(block.timestamp >= u.lastClaimTime + CLAIM_COOLDOWN, "1h");
 
         uint256 amount = u.settled;
         require(amount > 0, "nothing");
 
         u.settled = 0;
+        totalRewardsMinted += amount;
 
+        uint256 before = IERC20(address(stableToken)).balanceOf(address(this));
         stableToken.mint(address(this), amount);
+        require(
+            IERC20(address(stableToken)).balanceOf(address(this)) >= before + amount,
+            "mint failed"
+        );
 
         u.staked += amount;
         totalStaked += amount;
@@ -155,7 +169,7 @@ contract EnniSavings is ReentrancyGuard {
         UserInfo memory u = userInfo[user];
 
         uint256 _acc = accRewardPerShare;
-        if (block.timestamp > lastUpdateTime) {
+        if (block.timestamp > lastUpdateTime && totalStaked > 0) {
             _acc += (block.timestamp - lastUpdateTime) * RATE_PER_SECOND;
         }
 
@@ -187,7 +201,9 @@ contract EnniSavings is ReentrancyGuard {
     function _updateRewards() internal {
         uint64 now_ = uint64(block.timestamp);
         if (now_ > lastUpdateTime) {
-            accRewardPerShare += (now_ - lastUpdateTime) * RATE_PER_SECOND;
+            if (totalStaked > 0) {
+                accRewardPerShare += (now_ - lastUpdateTime) * RATE_PER_SECOND;
+            }
             lastUpdateTime = now_;
         }
     }
@@ -200,6 +216,7 @@ contract EnniSavings is ReentrancyGuard {
             if (unsettled > 0) {
                 u.settled += unsettled;
             }
+            u.rewardDebt = accumulated;
         }
     }
 
